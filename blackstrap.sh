@@ -11,8 +11,8 @@
 #   1. Boot into Arch Linux live environment
 #   2. Download this script
 #   3. Edit the configuration section (DISK, USRNAME, PASSWORD)
-#   4. Make executable: chmod +x archsetup.sh
-#   5. Run: ./archsetup.sh
+#   4. Make executable: chmod +x blackstrap.sh
+#   5. Run: ./blackstrap.sh
 #
 # Requirements:
 #   - UEFI-capable system
