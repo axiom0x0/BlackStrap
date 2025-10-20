@@ -1,7 +1,53 @@
 #!/usr/bin/env zsh
 #
-# Arch Linux Automated Installation Script
-# # Function for error messages
+# BlackStrap - Arch Linux Automated Installation Script
+#
+# This script automates the installation of Arch Linux with a focus on security.
+# It handles the entire installation process from disk partitioning to user setup
+# and system configuration.
+#
+# Usage:
+#   1. Boot into Arch Linux live environment
+#   2. Download this script
+#   3. Make executable: chmod +x blackstrap.sh
+#   4. Run: ./blackstrap.sh [OPTIONS]
+#
+# Options:
+#   --no-encryption     Disable LUKS encryption (default: enabled)
+#   --encrypt-boot      Encrypt /boot partition (advanced, requires GRUB password)
+#   --help, -h          Show help message
+#
+# Requirements:
+#   - UEFI-capable system
+#   - Internet connection
+#   - Sufficient disk space (minimum 20GB recommended)
+#
+# Features:
+#   - UEFI boot setup with GRUB
+#   - LUKS2    mkdir -p /home/TEMPLATE_USRNAME/.ssh
+#   - Separate /boot partition with integrity checking
+#   - Automated disk partitioning
+#   - User creation with sudo privileges
+#   - ZSH + Oh-My-Zsh configuration
+#   - Comprehensive terminal color support
+#   - Optional BlackArch repository integration
+#
+# Warning:
+#   - This script will ERASE ALL DATA on the specified disk
+#   - Interactive prompts for hostname, username, and password
+#
+# Troubleshooting:
+#   1. Disk not found: Use 'lsblk' to verify disk path
+#   2. Not in UEFI mode: Verify boot mode and BIOS settings
+#   3. No internet: Check connection with 'ping archlinux.org'
+#   4. BlackArch integration fails: Verify sudo access and try manually
+#
+# Author: axiom0x0
+
+set -e  # errexit
+set -u  # nounset
+
+# Function for error messages
 print_error() {
     echo "${RED}${BOLD}[ERROR] ${1}${RESET}" >&2
 }
@@ -48,57 +94,7 @@ if [[ "$ENCRYPT_BOOT" == true ]] && [[ "$USE_ENCRYPTION" == false ]]; then
     exit 1
 fi
 
-# === Configuration ===================================
-#
-# This script automates the installation of Arch Linux with a focus on security.
-# It handles the entire installation process from disk partitioning to user setup
-# and system configuration.
-#
-# Usage:
-#   1. Boot into Arch Linux live environment
-#   2. Download this script
-#   3. Edit the configuration section (DISK, USRNAME, PASSWORD)
-#   4. Make executable: chmod +x blackstrap.sh
-<<<<<<< HEAD
-#   5. Run: ./blackstrap.sh [OPTIONS]
-#
-# Options:
-#   --no-encryption     Disable LUKS encryption (default: enabled)
-#   --encrypt-boot      Encrypt /boot partition (advanced, requires GRUB password)
-=======
-#   5. Run: ./blackstrap.sh
->>>>>>> 19a23a5c4ca5fe1c667af7b6f2cba0e409601f21
-#
-# Requirements:
-#   - UEFI-capable system
-#   - Internet connection
-#   - Sufficient disk space (minimum 20GB recommended)
-#
-# Features:
-#   - UEFI boot setup with GRUB
-#   - LUKS2 + LVM encryption (optional)
-#   - Separate /boot partition with integrity checking
-#   - Automated disk partitioning
-#   - User creation with sudo privileges
-#   - ZSH + Oh-My-Zsh configuration
-#   - Comprehensive terminal color support
-#   - Optional BlackArch repository integration
-#
-# Warning:
-#   - This script will ERASE ALL DATA on the specified disk
-#   - Verify disk path (DISK variable) before running
-#   - Change default password after installation
-#
-# Troubleshooting:
-#   1. Disk not found: Use 'lsblk' to verify disk path
-#   2. Not in UEFI mode: Verify boot mode and BIOS settings
-#   3. No internet: Check connection with 'ping archlinux.org'
-#   4. BlackArch integration fails: Verify sudo access and try manually
-#
-# Author: axiom0x0
 
-set -e  # errexit
-set -u  # nounset
 
 # Color definitions
 RED=$'\e[31m'
@@ -141,17 +137,72 @@ VG_NAME="vg0"
 LV_SWAP_NAME="swap"
 LV_ROOT_NAME="root"
 
-# System Configuration
-HOSTNAME="yourHOSTNAME"   # change to desired hostname
-USRNAME="yourUSRNAME"     # change to desired username
-TIMEZONE="US/Pacific"
+# System Configuration - Interactive Prompts
+print_step "1.5" "System Configuration"
+
+# Allow environment variables to override prompts (useful for automation)
+HOSTNAME=${BLACKSTRAP_HOSTNAME:-}
+USRNAME=${BLACKSTRAP_USERNAME:-}
+TIMEZONE=${BLACKSTRAP_TIMEZONE:-}
+
+# Hostname
+[[ -z "$HOSTNAME" ]] && {
+    print -n "Enter hostname (default: archbox): "
+    read user_hostname
+    HOSTNAME=${user_hostname:-archbox}
+}
+
+# Validate hostname (basic check)
+if [[ ! "$HOSTNAME" =~ ^[a-zA-Z0-9-]+$ ]]; then
+    print_error "Invalid hostname. Use only letters, numbers, and hyphens."
+    exit 1
+fi
+
+# Username
+[[ -z "$USRNAME" ]] && {
+    print -n "Enter username (default: user): "
+    read user_username
+    USRNAME=${user_username:-user}
+}
+
+# Validate username (basic check)
+if [[ ! "$USRNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    print_error "Invalid username. Must start with letter/underscore, contain only lowercase letters, numbers, underscore, hyphen."
+    exit 1
+fi
+
+# Password (secure input)
+while true; do
+    echo -n "Enter password for user $USRNAME: "
+    read -s PASSWORD
+    echo
+    echo -n "Confirm password: "
+    read -s PASSWORD_CONFIRM
+    echo
+    
+    if [[ "$PASSWORD" == "$PASSWORD_CONFIRM" ]]; then
+        if [[ ${#PASSWORD} -lt 6 ]]; then
+            print_warning "Password should be at least 6 characters. Try again."
+            continue
+        fi
+        break
+    else
+        print_error "Passwords do not match. Try again."
+    fi
+done
+
+# Timezone (with current detection)
+[[ -z "$TIMEZONE" ]] && {
+    DETECTED_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || echo "US/Pacific")
+    print -n "Enter timezone (default: $DETECTED_TZ): "
+    read user_timezone
+    TIMEZONE=${user_timezone:-$DETECTED_TZ}
+}
+
+# Other configuration
 LOCALE="en_US.UTF-8 UTF-8"
 LANG="en_US.UTF-8"
 EDITOR="vim"
-
-# Security Note: In production, consider passing this as an environment variable
-# or using a separate configuration file instead of hardcoding it
-PASSWORD="changeme456"  # change this!
 
 # Display encryption status
 if [[ "$USE_ENCRYPTION" == true ]]; then
@@ -166,6 +217,24 @@ if [[ "$USE_ENCRYPTION" == true ]]; then
 else
     print_warning "Encryption: DISABLED"
 fi
+
+# Configuration Summary
+print_step "1.6" "Configuration Summary"
+echo "Disk: $DISK"
+echo "Hostname: $HOSTNAME"
+echo "Username: $USRNAME"
+echo "Timezone: $TIMEZONE"
+echo "Locale: $LOCALE"
+echo "Editor: $EDITOR"
+if [[ "$USE_ENCRYPTION" == true ]]; then
+    echo "Encryption: ENABLED"
+else
+    echo "Encryption: DISABLED"
+fi
+if [[ "$USE_ENCRYPTION" == true ]] && [[ "$ENCRYPT_BOOT" == true ]]; then
+    echo "Boot Encryption: ENABLED (Advanced)"
+fi
+echo ""
 
 # Add safety check for disk
 echo "${RED}${BOLD}WARNING: This will ERASE ALL DATA on $DISK. Continue? (y/N)${RESET}"
@@ -725,7 +794,104 @@ if [[ "${ssh_response:l}" == "y" ]]; then
     read -r auth_method
     auth_method=${auth_method:-1}
 
-    print_step "12" "Installing OpenSSH server"
+    # Handle key-based authentication setup in live environment BEFORE chroot
+    if [[ "$auth_method" == "2" ]]; then
+        print_step "12.1" "Setting up temporary SSH for key transfer"
+        
+        echo ""
+        echo "${RED}${BOLD}CRITICAL: SSH KEY SETUP REQUIRED${RESET}"
+        echo "${RED}${BOLD}Password authentication will be DISABLED - SSH access requires keys!${RESET}"
+        echo ""
+        echo "${BLUE}${BOLD}Setting up temporary SSH server in live environment...${RESET}"
+        echo ""
+        
+        # Install openssh in live environment if not present
+        pacman -Sy --noconfirm openssh 2>/dev/null || true
+        
+        # Create temporary user for key transfer  
+        TEMP_USER="keysetup_$(date +%s)"
+        TEMP_PASS=$(openssl rand -base64 12)
+        
+        # Clean up any existing temp users
+        for user in $(getent passwd | grep 'keysetup_' | cut -d: -f1); do
+            userdel -r "$user" 2>/dev/null || true
+        done
+        
+        # Create temp user in live environment
+        useradd -m "${TEMP_USER}"
+        echo "${TEMP_USER}:${TEMP_PASS}" | chpasswd
+        
+        # Backup and configure SSH for live environment
+        cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup 2>/dev/null || true
+        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+        
+        # Start SSH service in live environment
+        systemctl restart sshd 2>/dev/null || systemctl start sshd
+        
+        # Get IP address
+        LIVE_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
+        
+        echo ""
+        echo "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+        echo "${BLUE}${BOLD}SSH Key Transfer Instructions${RESET}"
+        echo "${BLUE}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+        echo ""
+        echo "${YELLOW}Live Environment IP: ${BOLD}${LIVE_IP}${RESET}"
+        echo "${YELLOW}Temporary User: ${BOLD}${TEMP_USER}${RESET}"
+        echo "${YELLOW}Temporary Password: ${BOLD}${TEMP_PASS}${RESET}"
+        echo ""
+        echo "${GREEN}${BOLD}Step 1:${RESET} ${GREEN}Copy your SSH key to the live environment${RESET}"
+        echo "   ${BLUE}ssh-copy-id -i ~/.ssh/id_ed25519.pub ${TEMP_USER}@${LIVE_IP}${RESET}"
+        echo ""
+        echo "${GREEN}${BOLD}Step 2:${RESET} ${GREEN}If you don't have SSH keys, create them first:${RESET}"
+        echo "   ${BLUE}ssh-keygen -t ed25519 -C \"your_email@example.com\"${RESET}"
+        echo ""
+        echo "${RED}${BOLD}Complete the key transfer NOW before continuing!${RESET}"
+        echo "${RED}${BOLD}WITHOUT KEYS YOU CANNOT SSH INTO THE INSTALLED SYSTEM!${RESET}"
+        echo ""
+        
+        # Wait for user confirmation
+        KEY_COPIED=false
+        while true; do
+            echo -n "${YELLOW}Have you completed ssh-copy-id? (y/N): ${RESET}"
+            read -r key_setup_done
+            if [[ "${key_setup_done:l}" == "y" ]]; then
+                # Verify key was copied to temp user
+                if [[ -f "/home/${TEMP_USER}/.ssh/authorized_keys" ]] && [[ -s "/home/${TEMP_USER}/.ssh/authorized_keys" ]]; then
+                    # Copy key to the new system's user directory
+                    mkdir -p "/mnt/home/${USRNAME}/.ssh"
+                    cp "/home/${TEMP_USER}/.ssh/authorized_keys" "/mnt/home/${USRNAME}/.ssh/authorized_keys"
+                    chmod 700 "/mnt/home/${USRNAME}/.ssh"
+                    chmod 600 "/mnt/home/${USRNAME}/.ssh/authorized_keys"
+                    KEY_COPIED=true
+                    echo ""
+                    echo "${GREEN}${BOLD}✓ SSH key successfully copied to new system!${RESET}"
+                    break
+                else
+                    echo ""
+                    echo "${RED}✗ No SSH key found in /home/${TEMP_USER}/.ssh/authorized_keys${RESET}"
+                    echo "${YELLOW}Please run ssh-copy-id before continuing.${RESET}"
+                    echo ""
+                    continue
+                fi
+            else
+                echo "${YELLOW}Please complete the SSH key transfer to continue.${RESET}"
+                continue
+            fi
+        done
+        
+        # Clean up temporary SSH setup
+        userdel -r "${TEMP_USER}" 2>/dev/null || true
+        if [[ -f /etc/ssh/sshd_config.backup ]]; then
+            mv /etc/ssh/sshd_config.backup /etc/ssh/sshd_config
+            systemctl restart sshd 2>/dev/null || systemctl stop sshd 2>/dev/null || true
+        fi
+        
+        echo ""
+    fi
+
+    print_step "12" "Installing OpenSSH server in new system"
     cat > /mnt/root/sshsetup.sh <<'SSHSCRIPT'
 #!/usr/bin/env zsh
 set -e
@@ -745,28 +911,18 @@ print_step "12.2" "Enabling sshd service"
 systemctl enable sshd
 
 if [[ "$AUTH_METHOD" == "2" ]]; then
-  # Define color variables locally in case they're out of scope
-    BLUE=$'\e[34m'
-    BOLD=$'\e[1m'
-    RESET=$'\e[0m'
     print_step "12.3" "Configuring key-based authentication"
     sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
     sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
     sed -i 's/^#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's/^PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-    mkdir -p /home/TEMPLATE_USRNAME/.ssh
-    chown TEMPLATE_USRNAME:users /home/TEMPLATE_USRNAME/.ssh
-    chmod 700 /home/TEMPLATE_USRNAME/.ssh
-    echo "${BLUE}${BOLD}IMPORTANT:${RESET} You enabled SSH key-based authentication."
-    echo " - Before rebooting, you must copy your SSH public key into the installed system."
-    echo " - Recommended:"
-    echo "     ssh-copy-id -i ~/.ssh/id_rsa.pub ${USRNAME}@<installed-system-ip>"
-    echo " - Or manually place your public key at:"
-    echo "     /home/${USRNAME}/.ssh/authorized_keys"
-    echo " - If you don“t have a key yet, generate one with:"
-    echo "     ssh-keygen -t ed25519 -C \"your_email@example.com\""
-    echo " - After adding the key, reboot and connect using:"
-    echo "     ssh ${USRNAME}@<installed-system-ip>"
+    
+    # Ensure SSH directory exists and has correct permissions
+    if [[ -f "/home/TEMPLATE_USRNAME/.ssh/authorized_keys" ]]; then
+        chmod 700 /home/TEMPLATE_USRNAME/.ssh
+        chmod 600 /home/TEMPLATE_USRNAME/.ssh/authorized_keys
+        chown -R TEMPLATE_USRNAME:users /home/TEMPLATE_USRNAME/.ssh
+    fi
 else
     print_step "12.3" "Configuring password-based authentication"
     sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
@@ -792,6 +948,22 @@ fi
 
 echo ""
 print_success "Installation complete!"
+echo ""
+
+# Installation Summary
+print_step "SUMMARY" "Installation Details"
+echo "Hostname: ${GREEN}${HOSTNAME}${RESET}"
+echo "Username: ${GREEN}${USRNAME}${RESET}"
+echo "Disk: ${GREEN}${DISK}${RESET}"
+echo "Timezone: ${GREEN}${TIMEZONE}${RESET}"
+if [[ "$USE_ENCRYPTION" == true ]]; then
+    echo "Encryption: ${GREEN}ENABLED${RESET}"
+else
+    echo "Encryption: ${GREEN}DISABLED${RESET}"
+fi
+if [[ "$USE_ENCRYPTION" == true ]] && [[ "$ENCRYPT_BOOT" == true ]]; then
+    echo "Boot Encryption: ${GREEN}ENABLED (Advanced)${RESET}"
+fi
 echo ""
 
 if [[ "$USE_ENCRYPTION" == true ]] && [[ "$ENCRYPT_BOOT" == false ]]; then

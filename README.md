@@ -183,6 +183,37 @@ A pacman hook automatically warns you when `/boot` is modified during updates.
 
 ---
 
+##  Optional: SSH Server Setup
+
+During installation, you can choose to install and configure an SSH server with two authentication methods:
+
+### Password-Based Authentication
+- Standard SSH with password login
+- Quick and simple setup
+- Suitable for trusted networks
+
+### Key-Based Authentication (Recommended)
+- More secure than passwords
+- The script will:
+  1. Set up a **temporary SSH server in the live environment**
+  2. Display connection details (IP, temp user, password)
+  3. Wait for you to run `ssh-copy-id` from your local machine
+  4. Copy your public key to the new system
+  5. Configure SSH with **password authentication disabled**
+
+**Important**: With key-based auth, you must have your SSH keys ready or the script will help you create them. Without copying your key during installation, you won't be able to SSH into the system after reboot!
+
+Example workflow:
+```bash
+# On your local machine (when prompted during installation):
+ssh-copy-id -i ~/.ssh/id_ed25519.pub keysetup_1234567890@192.168.1.100
+
+# After reboot, connect with your normal user:
+ssh yourusername@192.168.1.100
+```
+
+---
+
 ##  Optional: BlackArch Support
 
 If you opt in during the install, BlackStrap will:
@@ -210,7 +241,7 @@ If you opt in during the install, BlackStrap will:
 
 **Optionally:**
 - BlackArch repository and tools
-- SSH server (OpenSSH)
+- SSH server (OpenSSH) with password or key-based authentication
 
 ---
 
@@ -263,6 +294,7 @@ For deployment, consider:
 |----------------------|--------------------------------------------------|
 | 'blackstrap.sh'      | Main install script                              |
 | '/mnt/root/setup.sh' | Temporary setup script executed in chroot        |
+| '/mnt/root/sshsetup.sh' | Temporary SSH configuration script (optional) |
 | '/mnt/root/blackarch.sh' | Temporary BlackArch install (optional)       |
 
 ---
