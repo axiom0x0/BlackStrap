@@ -259,6 +259,14 @@ timedatectl set-ntp true
 print_step "3" "Partitioning $DISK..."
 sgdisk --zap-all "$DISK"
 
+if [[ "$DISK" =~ nvme ]] || [[ "$DISK" =~ "mmcblk" ]]; then 
+    # NVMe and eMMC use p1, p2, p3 style partition names
+    PART_PREFIX="${DISK}p"
+else
+    # SATA/SCSI use direct numbers
+    PART_PREFIX="${DISK}"
+fi
+
 if [[ "$USE_ENCRYPTION" == true ]]; then
     if [[ "$ENCRYPT_BOOT" == true ]]; then
         # Full disk encryption: EFI + encrypted boot + encrypted root (separate LUKS containers)
