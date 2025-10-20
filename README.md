@@ -1,3 +1,5 @@
+![BlackStrap](BlackStrap2.jpg)
+
 #  BlackStrap - Automated Arch + BlackArch Installer
 
 **BlackStrap** is an interactive Zsh-based install script that automates the installation of an Arch Linux system from scratch — with optional LUKS encryption, BlackArch tools, and SSH server preconfigured.
