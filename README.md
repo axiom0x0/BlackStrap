@@ -20,14 +20,14 @@ It handles full disk formatting, encryption setup, filesystem configuration, sys
 - Detects tampering/evil maid attacks
 
 ###  What's Included
-- ** Full UEFI-based Arch installation**
-- ** LVM on LUKS encryption** (optional)
-- ** Automated disk partitioning** (EFI + boot + encrypted root)
-- ** Zsh and [Oh My Zsh](https://ohmyz.sh/)** configured for the user
-- ** Custom LS_COLORS** and prompt color configuration
-- ** Optional [BlackArch](https://www.blackarch.org/)** repository integration
-- ** Optional SSH server** with password or key-based auth
-- ** Clean, color-coded** terminal output
+- **Full UEFI-based Arch installation**
+- **LVM on LUKS encryption** (optional)
+- **Automated disk partitioning** (EFI + boot + encrypted root)
+- **Zsh and [Oh My Zsh](https://ohmyz.sh/)** configured for the user
+- **Custom LS_COLORS** and prompt color configuration
+- **Optional [BlackArch](https://www.blackarch.org/)** repository integration
+- **Optional SSH server** with password or key-based auth
+- **Clean, color-coded** terminal output
 
 ---
 
@@ -72,53 +72,32 @@ It handles full disk formatting, encryption setup, filesystem configuration, sys
 
 ---
 
-##  Configuration
-
-Before running the script, **edit the following variables near the top of 'blackstrap.sh'**:
-
-
-```zsh
-DISK="/dev/sda"         # Target installation disk (e.g., /dev/nvme0n1)
-HOSTNAME="yourHOSTNAME" # Desired hostname
-USRNAME="yourUSRNAME"   # New user account name
-PASSWORD="changeme456"  # New user password (plaintext for now)
-TIMEZONE="US/Pacific"   # Timezone (e.g., Europe/Berlin)
-LOCALE="en_US.UTF-8 UTF-8"
-EDITOR="vim"            # Editor to install and use
-```
-
-
----
-
 ##  Usage
 
-1. Boot into a live Arch environment (e.g., official ISO).
-2. Connect to the internet (`ping archlinux.org` to verify).
-3. Download or copy this repo.
-4. Edit `blackstrap.sh` and adjust configuration.
-5. Run the script:
+1. Boot into a live Arch environment (e.g., official ISO)
+2. Connect to the internet (`ping archlinux.org` to verify)
+3. Download or copy this script:
    ```bash
+   curl -O https://raw.githubusercontent.com/axiom0x0/BlackStrap/main/blackstrap.sh
    chmod +x blackstrap.sh
+   ```
+4. Run the script with your desired options:
+   ```bash
    ./blackstrap.sh              # Standard with encryption
-   # or
    ./blackstrap.sh --no-encryption  # Without encryption
-   # or
    ./blackstrap.sh --encrypt-boot   # Full disk encryption
    ```
+5. The script will **interactively prompt** you for:
+   - Target disk selection
+   - Hostname
+   - Username and password
+   - Timezone
+   - Text editor preference
+   - Encryption password (if applicable)
+   - BlackArch repository installation (optional)
+   - SSH server setup (optional)
 
-6. The script will prompt you to select a disk and confirm.
-7. **If encryption is enabled**, you'll be asked to enter and confirm a password.
-8. The script will then:
-   - Partition and format the disk
-   - Set up LUKS2 + LVM encryption (if enabled)
-   - Install the base system with encryption tools
-   - Configure boot integrity checking (if applicable)
-   - Set timezone, locale, user, and shell
-   - Install and configure Oh My Zsh
-   - Ask if you'd like to add the BlackArch repository
-   - Ask if you'd like to add an SSH server
-
-9. Reboot and enjoy your encrypted Arch system!
+6. After installation completes, reboot and enjoy your new Arch system!
 
 ---
 
@@ -229,9 +208,9 @@ If you opt in during the install, BlackStrap will:
 
 **Base System:**
 - `base`, `linux`, `linux-firmware`
-- `zsh`, `sudo`, `curl`, `git`
-- `terminus-font`, `grc`, your chosen `$EDITOR`
-- `NetworkManager`, `grub`, `os-prober`
+- `zsh`, `sudo`, `curl`, `git`, `wget`
+- `terminus-font`, `grc`, your chosen editor
+- `NetworkManager`, `grub`, `efibootmgr`, `os-prober`
 
 **With Encryption:**
 - `lvm2`, `cryptsetup`
@@ -239,9 +218,10 @@ If you opt in during the install, BlackStrap will:
 - Automatic crypttab configuration (full disk encryption)
 - Pacman hooks for update warnings
 
-**Optionally:**
+**Optional Features:**
 - BlackArch repository and tools
 - SSH server (OpenSSH) with password or key-based authentication
+- Oh My Zsh with custom configuration
 
 ---
 
@@ -278,13 +258,13 @@ When you use `--encrypt-boot`, you get maximum security but need to enter your p
 
 ---
 
-##  Additional Documentation
+##  Additional Notes
 
-For deployment, consider:
-- **Never hardcode passwords** in production
-- Use environment variables or encrypted files
-- Change default passwords immediately after installation
-- Review and customize the encryption setup for your needs
+**For deployment:**
+- All configuration is now handled via interactive prompts
+- No need to edit the script directly
+- The script validates inputs and provides helpful error messages
+- Review and customize the encryption setup for your specific needs
 
 ---
 
@@ -292,22 +272,26 @@ For deployment, consider:
 
 | File                 | Description                                      |
 |----------------------|--------------------------------------------------|
-| 'blackstrap.sh'      | Main install script                              |
-| '/mnt/root/setup.sh' | Temporary setup script executed in chroot        |
-| '/mnt/root/sshsetup.sh' | Temporary SSH configuration script (optional) |
-| '/mnt/root/blackarch.sh' | Temporary BlackArch install (optional)       |
+| `blackstrap.sh`      | Main install script                              |
+| `/mnt/root/setup.sh` | Temporary setup script executed in chroot        |
+| `/mnt/root/sshsetup.sh` | Temporary SSH configuration script (optional) |
+| `/mnt/root/blackarch.sh` | Temporary BlackArch install (optional)       |
 
 ---
 
-##  Things to Improve
+##  Future Improvements
 
 - BTRFS or other filesystem options
-- Lighter terminal output for low-contrast environments
-- Password prompt instead of hardcoded variables
+- Multi-boot support
+- Custom partition sizing
 
 ---
 
-##  Issues
+##  Issues & Contributing
 
-Open an issue or submit a PR if something breaks. This script assumes a clean UEFI system and may not handle edge cases (e.g., dual booting).
+Open an issue or submit a PR if something breaks. This script assumes:
+- A clean UEFI system
+- Single disk installation
+- No existing partitions to preserve
 
+For dual-boot or complex setups, manual partitioning may be required.
