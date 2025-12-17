@@ -24,8 +24,9 @@
 #
 # Features:
 #   - UEFI boot setup with GRUB
-#   - LUKS2    mkdir -p /home/TEMPLATE_USRNAME/.ssh
+#   - LUKS2 encryption with LVM
 #   - Separate /boot partition with integrity checking
+#   - BTRFS support with snapshots and compression
 #   - Automated disk partitioning
 #   - User creation with sudo privileges
 #   - ZSH + Oh-My-Zsh configuration
@@ -199,6 +200,29 @@ done
     TIMEZONE=${user_timezone:-$DETECTED_TZ}
 }
 
+# Filesystem choice for root partition
+print_step "1.7" "Root Filesystem Selection"
+echo "Choose root filesystem:"
+echo "  1) ext4 (traditional, faster)"
+echo "  2) btrfs (modern: snapshots + compression)"
+print -n "Enter choice (default: 1): "
+read fs_choice
+
+if [[ "${fs_choice}" == "2" ]]; then
+    USE_BTRFS=true
+    FILESYSTEM="btrfs"
+    print_warning "BTRFS selected for root partition"
+    echo "  • Transparent zstd compression"
+    echo "  • Manual snapshots (snapper)"
+    echo "  • Subvolumes: @, @home, @snapshots, @var_log"
+    if [[ "$USE_ENCRYPTION" == true ]]; then
+        echo "  • Note: Compression less effective inside LUKS"
+    fi
+else
+    USE_BTRFS=false
+    FILESYSTEM="ext4"
+fi
+
 # Other configuration
 LOCALE="en_US.UTF-8 UTF-8"
 LANG="en_US.UTF-8"
@@ -219,13 +243,14 @@ else
 fi
 
 # Configuration Summary
-print_step "1.6" "Configuration Summary"
+print_step "1.8" "Configuration Summary"
 echo "Disk: $DISK"
 echo "Hostname: $HOSTNAME"
 echo "Username: $USRNAME"
 echo "Timezone: $TIMEZONE"
 echo "Locale: $LOCALE"
 echo "Editor: $EDITOR"
+echo "Root Filesystem: $FILESYSTEM"
 if [[ "$USE_ENCRYPTION" == true ]]; then
     echo "Encryption: ENABLED"
 else
@@ -320,17 +345,58 @@ if [[ "$USE_ENCRYPTION" == true ]]; then
         echo -n "$LUKS_PASSWORD" | cryptsetup luksFormat --type luks1 "$BOOT_LUKS_PART" -
         echo -n "$LUKS_PASSWORD" | cryptsetup open "$BOOT_LUKS_PART" cryptboot -
         
+        # Wait for cryptboot device
+        for i in {1..20}; do
+            [[ -e /dev/mapper/cryptboot ]] && break
+            sleep 0.1
+        done
+        [[ -e /dev/mapper/cryptboot ]] || { print_error "cryptboot device failed to appear"; exit 1; }
+        
         print_step "4.2" "Creating LUKS2 container for root..."
         echo -n "$LUKS_PASSWORD" | cryptsetup luksFormat --type luks2 "$ROOT_LUKS_PART" -
         echo -n "$LUKS_PASSWORD" | cryptsetup open "$ROOT_LUKS_PART" "$LUKS_NAME" -
         
+        # Wait for cryptlvm device
+        for i in {1..20}; do
+            [[ -e /dev/mapper/$LUKS_NAME ]] && break
+            sleep 0.1
+        done
+        [[ -e /dev/mapper/$LUKS_NAME ]] || { print_error "$LUKS_NAME device failed to appear"; exit 1; }
+        
         # Format encrypted boot partition directly
         BOOT_PART="/dev/mapper/cryptboot"
+        LUKS_PART_DEVICE="$ROOT_LUKS_PART"  # FIX: Define for chroot script
+        
+        # Optional: Create keyfile to avoid dual password entry
+        echo ""
+        echo "${YELLOW}${BOLD}Encrypted /boot requires password at GRUB${RESET}"
+        echo "${YELLOW}Would you like to create a keyfile to avoid entering password twice? (Y/n)${RESET}"
+        echo "  - Without keyfile: Enter password for GRUB, then again for root"
+        echo "  - With keyfile: Enter password once for GRUB, root unlocks automatically"
+        read -r keyfile_response
+        
+        if [[ "${keyfile_response:l}" != "n" ]]; then
+            USE_KEYFILE=true
+            print_step "4.3" "Keyfile will be created during system configuration..."
+        else
+            USE_KEYFILE=false
+            print_warning "Keyfile disabled - you will enter password twice at boot"
+        fi
     else
         # Single LUKS2 container for root only
         print_step "4.1" "Creating LUKS2 container..."
         echo -n "$LUKS_PASSWORD" | cryptsetup luksFormat --type luks2 "$LUKS_PART" -
         echo -n "$LUKS_PASSWORD" | cryptsetup open "$LUKS_PART" "$LUKS_NAME" -
+        
+        # Wait for cryptlvm device
+        for i in {1..20}; do
+            [[ -e /dev/mapper/$LUKS_NAME ]] && break
+            sleep 0.1
+        done
+        [[ -e /dev/mapper/$LUKS_NAME ]] || { print_error "$LUKS_NAME device failed to appear"; exit 1; }
+        
+        LUKS_PART_DEVICE="$LUKS_PART"  # FIX: Define for chroot script
+        USE_KEYFILE=false  # No keyfile needed - single password entry
     fi
     
     print_step "5" "Setting up LVM..."
@@ -341,6 +407,19 @@ if [[ "$USE_ENCRYPTION" == true ]]; then
     lvcreate -L 4G "$VG_NAME" -n "$LV_SWAP_NAME"
     lvcreate -l 100%FREE "$VG_NAME" -n "$LV_ROOT_NAME"
     
+    # Wait for LVM devices
+    for i in {1..20}; do
+        [[ -e /dev/$VG_NAME/$LV_SWAP_NAME ]] && break
+        sleep 0.1
+    done
+    [[ -e /dev/$VG_NAME/$LV_SWAP_NAME ]] || { print_error "LVM swap device failed to appear"; exit 1; }
+    
+    for i in {1..20}; do
+        [[ -e /dev/$VG_NAME/$LV_ROOT_NAME ]] && break
+        sleep 0.1
+    done
+    [[ -e /dev/$VG_NAME/$LV_ROOT_NAME ]] || { print_error "LVM root device failed to appear"; exit 1; }
+    
     SWAP_PART="/dev/$VG_NAME/$LV_SWAP_NAME"
     ROOT_PART="/dev/$VG_NAME/$LV_ROOT_NAME"
     
@@ -348,11 +427,41 @@ if [[ "$USE_ENCRYPTION" == true ]]; then
     mkfs.fat -F32 "$EFI_PART"
     mkfs.ext4 -L boot "$BOOT_PART"
     mkswap "$SWAP_PART"
-    mkfs.ext4 -L root "$ROOT_PART"
+    
+    if [[ "$USE_BTRFS" == true ]]; then
+        mkfs.btrfs -f -L root "$ROOT_PART"
+    else
+        mkfs.ext4 -L root "$ROOT_PART"
+    fi
     
     print_step "7" "Mounting filesystems..."
-    mount "$ROOT_PART" /mnt
-    mkdir -p /mnt/boot
+    
+    if [[ "$USE_BTRFS" == true ]]; then
+        # Mount root temporarily to create subvolumes
+        mount "$ROOT_PART" /mnt
+        
+        # Create subvolumes (snapper will create .snapshots itself)
+        btrfs subvolume create /mnt/@
+        btrfs subvolume create /mnt/@home
+        btrfs subvolume create /mnt/@var_log
+        
+        # Unmount and remount with proper subvolumes
+        umount /mnt
+        
+        # Mount root subvolume with compression
+        mount -o compress=zstd,subvol=@ "$ROOT_PART" /mnt
+        
+        # Create mount points and mount subvolumes
+        mkdir -p /mnt/{home,var/log,boot}
+        mount -o compress=zstd,subvol=@home "$ROOT_PART" /mnt/home
+        mount -o compress=zstd,subvol=@var_log "$ROOT_PART" /mnt/var/log
+    else
+        # Standard ext4 mounting
+        mount "$ROOT_PART" /mnt
+        mkdir -p /mnt/boot
+    fi
+    
+    # Boot is always ext4 (same for both)
     mount "$BOOT_PART" /mnt/boot
     mkdir -p /mnt/boot/EFI
     mount "$EFI_PART" /mnt/boot/EFI
@@ -361,20 +470,60 @@ else
     print_step "4" "Formatting partitions..."
     mkfs.fat -F32 "$EFI_PART"
     mkswap "$SWAP_PART"
-    mkfs.ext4 "$ROOT_PART"
+    
+    if [[ "$USE_BTRFS" == true ]]; then
+        mkfs.btrfs -f -L root "$ROOT_PART"
+    else
+        mkfs.ext4 "$ROOT_PART"
+    fi
     
     print_step "5" "Mounting filesystems..."
-    mount "$ROOT_PART" /mnt
-    mkdir -p /mnt/boot/EFI
+    
+    if [[ "$USE_BTRFS" == true ]]; then
+        # Mount root temporarily to create subvolumes
+        mount "$ROOT_PART" /mnt
+        
+        # Create subvolumes (snapper will create .snapshots itself)
+        btrfs subvolume create /mnt/@
+        btrfs subvolume create /mnt/@home
+        btrfs subvolume create /mnt/@var_log
+        
+        # Unmount and remount with proper subvolumes
+        umount /mnt
+        
+        # Mount root subvolume with compression
+        mount -o compress=zstd,subvol=@ "$ROOT_PART" /mnt
+        
+        # Create mount points and mount subvolumes
+        mkdir -p /mnt/{home,var/log,boot}
+        mount -o compress=zstd,subvol=@home "$ROOT_PART" /mnt/home
+        mount -o compress=zstd,subvol=@var_log "$ROOT_PART" /mnt/var/log
+        
+        # Create boot/EFI mount point
+        mkdir -p /mnt/boot/EFI
+    else
+        # Standard ext4 mounting
+        mount "$ROOT_PART" /mnt
+        mkdir -p /mnt/boot/EFI
+    fi
+    
     mount "$EFI_PART" /mnt/boot/EFI
     swapon "$SWAP_PART"
 fi
 
 print_step "8" "Installing base system and essentials..."
 if [[ "$USE_ENCRYPTION" == true ]]; then
-    pacstrap /mnt base linux linux-firmware zsh sudo git curl $EDITOR terminus-font grc lvm2 cryptsetup
+    if [[ "$USE_BTRFS" == true ]]; then
+        pacstrap /mnt base linux linux-firmware zsh sudo git curl $EDITOR terminus-font grc lvm2 cryptsetup btrfs-progs
+    else
+        pacstrap /mnt base linux linux-firmware zsh sudo git curl $EDITOR terminus-font grc lvm2 cryptsetup
+    fi
 else
-    pacstrap /mnt base linux linux-firmware zsh sudo git curl $EDITOR terminus-font grc
+    if [[ "$USE_BTRFS" == true ]]; then
+        pacstrap /mnt base linux linux-firmware zsh sudo git curl $EDITOR terminus-font grc btrfs-progs
+    else
+        pacstrap /mnt base linux linux-firmware zsh sudo git curl $EDITOR terminus-font grc
+    fi
 fi
 
 print_step "9" "Generating fstab..."
@@ -397,8 +546,12 @@ LANG="TEMPLATE_LANG"
 PASSWORD="TEMPLATE_PASSWORD"
 USE_ENCRYPTION="TEMPLATE_USE_ENCRYPTION"
 ENCRYPT_BOOT="TEMPLATE_ENCRYPT_BOOT"
+USE_BTRFS="TEMPLATE_USE_BTRFS"
+USE_KEYFILE="TEMPLATE_USE_KEYFILE"
 LUKS_NAME="TEMPLATE_LUKS_NAME"
 LUKS_PART_DEVICE="TEMPLATE_LUKS_PART_DEVICE"
+BOOT_LUKS_PART="TEMPLATE_BOOT_LUKS_PART"
+LUKS_PASSWORD="TEMPLATE_LUKS_PASSWORD"
 
 print_step() {
     echo "\e[34m\e[1m[\e[97m${1}\e[34m] ${2}\e[0m"
@@ -428,6 +581,8 @@ TEMPLATE_VARS=(
     TEMPLATE_PASSWORD "$PASSWORD"
     TEMPLATE_USE_ENCRYPTION "$USE_ENCRYPTION"
     TEMPLATE_ENCRYPT_BOOT "$ENCRYPT_BOOT"
+    TEMPLATE_USE_BTRFS "$USE_BTRFS"
+    TEMPLATE_USE_KEYFILE "${USE_KEYFILE:-false}"
 )
 
 for key value in "${(@kv)TEMPLATE_VARS}"; do
@@ -437,10 +592,12 @@ done
 # Add encryption-specific variables if needed
 if [[ "$USE_ENCRYPTION" == true ]]; then
     sed -i "s|TEMPLATE_LUKS_NAME|${LUKS_NAME}|g" /mnt/root/setup.sh
+    sed -i "s|TEMPLATE_LUKS_PASSWORD|${LUKS_PASSWORD}|g" /mnt/root/setup.sh
     
     if [[ "$ENCRYPT_BOOT" == true ]]; then
-        # When boot is encrypted, pass the root LUKS partition
+        # When boot is encrypted, pass the root LUKS partition and boot partition
         sed -i "s|TEMPLATE_LUKS_PART_DEVICE|${ROOT_LUKS_PART}|g" /mnt/root/setup.sh
+        sed -i "s|TEMPLATE_BOOT_LUKS_PART|${BOOT_LUKS_PART}|g" /mnt/root/setup.sh
     else
         # Standard encryption, single LUKS partition
         sed -i "s|TEMPLATE_LUKS_PART_DEVICE|${LUKS_PART}|g" /mnt/root/setup.sh
@@ -461,7 +618,10 @@ sed -i "s|^#${LOCALE}|${LOCALE}|" /etc/locale.gen
 locale-gen
 echo "LANG=$LANG" > /etc/locale.conf
 
-print_step "10.3" "Hostname setup"
+print_step "10.3" "Console setup"
+echo "KEYMAP=us" > /etc/vconsole.conf
+
+print_step "10.4" "Hostname setup"
 echo "$HOSTNAME" > /etc/hostname
 cat > /etc/hosts <<EOT
 127.0.0.1   localhost
@@ -471,6 +631,52 @@ EOT
 
 if [[ "$USE_ENCRYPTION" == "true" ]]; then
     print_step "10.3.5" "Configuring mkinitcpio for encryption"
+    
+    # Detect GPU and add appropriate modules
+    GPU_MODULES=""
+    if lspci | grep -i "VGA.*AMD" > /dev/null; then
+        GPU_MODULES="amdgpu"
+        print_warning "AMD GPU detected - adding amdgpu module"
+    elif lspci | grep -i "VGA.*NVIDIA" > /dev/null; then
+        GPU_MODULES="nvidia nvidia_modeset nvidia_uvm nvidia_drm"
+        print_warning "NVIDIA GPU detected - adding nvidia modules"
+    elif lspci | grep -i "VGA.*Intel" > /dev/null; then
+        GPU_MODULES="i915"
+        print_warning "Intel GPU detected - adding i915 module"
+    fi
+    
+    # Handle keyfile for dual LUKS setup
+    if [[ "$USE_KEYFILE" == "true" ]]; then
+        print_step "10.3.6" "Creating LUKS keyfile for automatic root unlock"
+        
+        # Generate secure random keyfile
+        dd if=/dev/urandom of=/crypto_keyfile.bin bs=512 count=4 iflag=fullblock
+        chmod 000 /crypto_keyfile.bin
+        
+        # Add keyfile to root LUKS container
+        echo -n "$LUKS_PASSWORD" | cryptsetup luksAddKey "$LUKS_PART_DEVICE" /crypto_keyfile.bin -
+        
+        # If using encrypted boot, also add keyfile to boot partition
+        if [[ "$ENCRYPT_BOOT" == "true" ]]; then
+            print_step "10.3.7" "Adding keyfile to boot partition for automatic unlock"
+            echo -n "$LUKS_PASSWORD" | cryptsetup luksAddKey "$BOOT_LUKS_PART" /crypto_keyfile.bin -
+            print_success "Keyfile added to both root and boot LUKS containers"
+        fi
+        
+        # Add keyfile to initramfs
+        if [[ -n "$GPU_MODULES" ]]; then
+            sed -i "s/^MODULES=.*/MODULES=($GPU_MODULES)/" /etc/mkinitcpio.conf
+        fi
+        sed -i 's|^FILES=.*|FILES=(/crypto_keyfile.bin)|' /etc/mkinitcpio.conf
+        
+        print_success "Keyfile created and added to initramfs"
+    else
+        # GPU modules only (no keyfile)
+        if [[ -n "$GPU_MODULES" ]]; then
+            sed -i "s/^MODULES=.*/MODULES=($GPU_MODULES)/" /etc/mkinitcpio.conf
+        fi
+    fi
+    
     sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
 fi
 
@@ -483,6 +689,38 @@ pacman -S --noconfirm networkmanager wpa_supplicant wireless_tools netctl || {
     exit 1
 }
 systemctl enable NetworkManager
+
+if [[ "$USE_BTRFS" == "true" ]]; then
+    print_step "10.5.5" "Setting up BTRFS snapshots"
+    
+    # Install snapper
+    set +e
+    pacman -S --noconfirm snapper
+    set -e
+    
+    # Create oneshot service to configure snapper on first boot
+    cat > /etc/systemd/system/snapper-setup.service << 'SNAPSERVICE'
+[Unit]
+Description=Initialize snapper config on first boot
+ConditionPathExists=!/etc/snapper/configs/root
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/snapper -c root create-config /
+ExecStart=/usr/bin/systemctl disable snapper-timeline.timer
+ExecStart=/usr/bin/systemctl disable snapper-cleanup.timer
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SNAPSERVICE
+    
+    systemctl enable snapper-setup.service
+    
+    print_success "Snapper will auto-configure on first boot"
+    echo "Usage: snapper -c root create -d 'description'"
+fi
 
 print_step "10.6" "Bootloader"
 set +e
@@ -505,7 +743,14 @@ if [[ "$USE_ENCRYPTION" == "true" ]]; then
         
         [[ $BLKID_EXIT -ne 0 ]] && { print_error "Failed to get root partition UUID"; exit 1; }
         
-        sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${ROOT_UUID}:${LUKS_NAME}\"|" /etc/default/grub
+        if [[ "$USE_KEYFILE" == "true" ]]; then
+            # Keyfile in initramfs - automatic unlock
+            sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${ROOT_UUID}:${LUKS_NAME} cryptkey=rootfs:/crypto_keyfile.bin\"|" /etc/default/grub
+        else
+            # No keyfile - manual password entry
+            sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${ROOT_UUID}:${LUKS_NAME}\"|" /etc/default/grub
+        fi
+        
         echo "GRUB_ENABLE_CRYPTODISK=y" >> /etc/default/grub
         
         # Configure crypttab for the boot partition
@@ -514,11 +759,21 @@ if [[ "$USE_ENCRYPTION" == "true" ]]; then
         [[ $? -ne 0 ]] && BOOT_UUID=$(blkid -s UUID -o value /dev/disk/by-partlabel/Encrypted\\x20Boot 2>&1)
         set -e
         
-        echo "cryptboot UUID=${BOOT_UUID} none luks" > /etc/crypttab
-        
-        print_warning "Encrypted /boot: You will enter password TWICE at boot"
-        print_warning "  1) GRUB unlocks /boot (LUKS1)"
-        print_warning "  2) Kernel unlocks root (LUKS2)"
+        if [[ "$USE_KEYFILE" == "true" ]]; then
+            # With keyfile: both root and boot auto-unlock after GRUB
+            echo "cryptboot UUID=${BOOT_UUID} /crypto_keyfile.bin luks" > /etc/crypttab
+            print_warning "Encrypted /boot with keyfile: Password ONCE at GRUB only"
+            print_warning "  1) GRUB unlocks /boot to read kernel/initramfs (LUKS1 - password)"
+            print_warning "  2) Root auto-unlocks via keyfile (LUKS2 - no prompt)"
+            print_warning "  3) Boot auto-unlocks via keyfile (LUKS1 - no prompt)"
+        else
+            # Without keyfile: manual unlock needed at kernel stage
+            echo "cryptboot UUID=${BOOT_UUID} none luks" > /etc/crypttab
+            print_warning "Encrypted /boot: You will enter password THREE times at boot"
+            print_warning "  1) GRUB unlocks /boot to read kernel/initramfs (LUKS1)"
+            print_warning "  2) Kernel unlocks root partition (LUKS2)"
+            print_warning "  3) Kernel unlocks /boot for mounting (LUKS1 again)"
+        fi
     else
         # Single LUKS device
         UUID=$(blkid -s UUID -o value "$LUKS_PART_DEVICE")
@@ -567,10 +822,46 @@ METADATA_FILE="/var/lib/boot-checksums/boot.metadata"
 BACKUP_FILE="$CHECKSUM_FILE.backup"
 TEMP_FILE="/tmp/boot-check-$$.sha256"
 
+# Helper function to check if file is immutable
+is_immutable() {
+    lsattr "$1" 2>/dev/null | grep -q '^....i'
+}
+
+# Helper function to make file immutable
+make_immutable() {
+    chattr +i "$1" 2>/dev/null || {
+        echo -e "${RED}ERROR: Failed to set immutable attribute on $1${NC}"
+        echo "Required: chattr +i (e2fsprogs/xfsprogs)"
+        return 1
+    }
+    # Verify it actually worked
+    if ! lsattr "$1" 2>/dev/null | grep -q '^....i'; then
+        echo -e "${RED}ERROR: chattr +i succeeded but immutable flag not set${NC}"
+        echo "Filesystem may not support immutable attribute"
+        return 1
+    fi
+}
+
+# Helper function to make file mutable
+make_mutable() {
+    chattr -i "$1" 2>/dev/null || {
+        echo -e "${RED}ERROR: Failed to remove immutable attribute from $1${NC}"
+        return 1
+    }
+}
+
 verify() {
     VERBOSE=0
     [[ "${1:-}" == "--verbose" || "${1:-}" == "-v" ]] && VERBOSE=1
     [[ ! -f "$CHECKSUM_FILE" ]] && { echo -e "${RED}ERROR: No checksum file${NC}"; exit 1; }
+    
+    # Check if database is immutable (security verification)
+    if ! is_immutable "$CHECKSUM_FILE"; then
+        echo -e "${RED}WARNING: Checksum database is NOT immutable!${NC}"
+        echo -e "${RED}Database may have been compromised.${NC}"
+        echo "Fix: sudo boot-integrity update"
+        echo ""
+    fi
     
     echo -e "${BLUE}=== Boot Integrity Verification ===${NC}"
     echo ""
@@ -578,12 +869,12 @@ verify() {
     echo "Files tracked: $(wc -l < "$CHECKSUM_FILE")"
     echo ""
     
-    find /boot -type f -exec sha256sum {} \; | sort > "$TEMP_FILE"
+    find /boot -type f ! -path '*/EFI/NvVars' -exec sha256sum {} \; | sort > "$TEMP_FILE"
     echo "Current files: $(wc -l < "$TEMP_FILE")"
     echo ""
     
-    ADDED=$(comm -13 <(sort "$CHECKSUM_FILE" | awk '{print $2}') <(sort "$TEMP_FILE" | awk '{print $2}'))
-    REMOVED=$(comm -23 <(sort "$CHECKSUM_FILE" | awk '{print $2}') <(sort "$TEMP_FILE" | awk '{print $2}'))
+    ADDED=$(comm -13 <(awk '{print $2}' "$CHECKSUM_FILE" | sort) <(awk '{print $2}' "$TEMP_FILE" | sort))
+    REMOVED=$(comm -23 <(awk '{print $2}' "$CHECKSUM_FILE" | sort) <(awk '{print $2}' "$TEMP_FILE" | sort))
     MODIFIED=""
     while IFS= read -r line; do
         HASH=$(echo "$line" | awk '{print $1}'); FILE=$(echo "$line" | awk '{print $2}')
@@ -615,12 +906,28 @@ update() {
     [[ $EUID -ne 0 ]] && { echo "Must run as root"; exit 1; }
     echo -e "${BLUE}=== Updating Boot Checksums ===${NC}"
     echo ""
-    [[ -f "$CHECKSUM_FILE" ]] && { cp "$CHECKSUM_FILE" "$BACKUP_FILE"; echo -e "${GREEN}[OK] Backed up${NC}"; }
     
-    FILE_COUNT=$(find /boot -type f | wc -l)
-    echo -e "Scanning... Files: ${YELLOW}$FILE_COUNT${NC}"
+    # Remove immutable attribute temporarily from both files
+    if [[ -f "$CHECKSUM_FILE" ]] && is_immutable "$CHECKSUM_FILE"; then
+        echo -e "${BLUE}[*] Removing immutable protection from checksum database...${NC}"
+        make_mutable "$CHECKSUM_FILE" || exit 1
+    fi
+    if [[ -f "$METADATA_FILE" ]] && is_immutable "$METADATA_FILE"; then
+        echo -e "${BLUE}[*] Removing immutable protection from metadata...${NC}"
+        make_mutable "$METADATA_FILE" || exit 1
+    fi
+    
+    # Backup existing checksums
+    [[ -f "$CHECKSUM_FILE" ]] && { 
+        cp "$CHECKSUM_FILE" "$BACKUP_FILE"
+        echo -e "${GREEN}[OK] Backed up existing checksums${NC}"
+    }
+    
+    FILE_COUNT=$(find /boot -type f ! -path '*/EFI/NvVars' | wc -l)
+    echo -e "Scanning /boot... Files: ${YELLOW}$FILE_COUNT${NC}"
     echo ""
-    find /boot -type f -exec sha256sum {} \; > "$CHECKSUM_FILE"; chmod 600 "$CHECKSUM_FILE"
+    find /boot -type f ! -path '*/EFI/NvVars' -exec sha256sum {} \; > "$CHECKSUM_FILE"
+    chmod 600 "$CHECKSUM_FILE"
     
     cat > "$METADATA_FILE" <<META
 # Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -630,7 +937,15 @@ META
     command -v pacman &>/dev/null && pacman -Q | grep "^linux\|^grub\|^efibootmgr" >> "$METADATA_FILE" 2>/dev/null
     chmod 600 "$METADATA_FILE"
     
-    echo -e "${GREEN}[OK] Checksums updated${NC}"
+    # Set immutable attribute on both files
+    echo -e "${BLUE}[*] Setting immutable protection...${NC}"
+    make_immutable "$CHECKSUM_FILE" || exit 1
+    make_immutable "$METADATA_FILE" || echo -e "${YELLOW}Warning: Could not protect metadata${NC}"
+    
+    echo ""
+    echo -e "${GREEN}[OK] Checksums updated and protected${NC}"
+    echo -e "${GREEN}[OK] Database is now IMMUTABLE${NC}"
+    echo ""
     echo "Verify: sudo boot-integrity verify"
 }
 
@@ -642,6 +957,16 @@ info() {
     echo -e "${GREEN}Database:${NC}"
     echo "  Files: $(wc -l < "$CHECKSUM_FILE")"
     echo "  Updated: $(stat -c %y "$CHECKSUM_FILE" 2>/dev/null || stat -f "%Sm" "$CHECKSUM_FILE")"
+    
+    # Check immutable status
+    if lsattr "$CHECKSUM_FILE" 2>/dev/null | grep -q '^....i'; then
+        echo -e "  Protection: ${GREEN}IMMUTABLE ✓${NC}"
+    elif lsattr "$CHECKSUM_FILE" 2>&1 | grep -q "Permission denied"; then
+        echo -e "  Protection: ${YELLOW}UNKNOWN (run as root to verify)${NC}"
+    else
+        echo -e "  Protection: ${RED}MUTABLE (INSECURE!)${NC}"
+    fi
+    
     if [[ -f "$METADATA_FILE" ]]; then
         echo ""
         echo -e "${BLUE}Metadata:${NC}"
@@ -652,7 +977,7 @@ info() {
         echo -e "${GREEN}Backup:${NC} $BACKUP_FILE ($(wc -l < "$BACKUP_FILE") files)"
     fi
     echo ""
-    echo -e "${BLUE}Current:${NC} $(find /boot -type f | wc -l) files, $(du -sh /boot | awk '{print $1}')"
+    echo -e "${BLUE}Current /boot:${NC} $(find /boot -type f | wc -l) files, $(du -sh /boot | awk '{print $1}')"
 }
 
 case "${1:-}" in
@@ -683,8 +1008,92 @@ Target = linux-hardened
 [Action]
 Description = Warning: /boot has been modified - update checksums
 When = PostTransaction
-Exec = /usr/bin/bash -c 'echo ""; echo "WARNING: Kernel updated - /boot contents changed"; echo "Run: sudo boot-integrity update"; echo ""'
+Exec = /usr/bin/bash -c 'echo ""; echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; echo "WARNING: Kernel updated - /boot contents changed"; echo "Run: sudo boot-integrity update"; echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; echo ""'
 HOOKCONTENT
+
+    # Make initial checksums immutable
+    /usr/local/bin/boot-integrity update > /dev/null 2>&1 || true
+
+    # Create first-boot service to update checksums after firmware settles
+    cat > /etc/systemd/system/boot-integrity-firstboot.service << 'BOOTFIRSTSVC'
+[Unit]
+Description=Update boot integrity checksums on first boot
+ConditionPathExists=/var/lib/boot-checksums/boot.sha256
+ConditionPathExists=!/var/lib/boot-checksums/.firstboot-complete
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/chattr -i /var/lib/boot-checksums/boot.sha256
+ExecStart=/usr/bin/chattr -i /var/lib/boot-checksums/boot.metadata
+ExecStart=/usr/local/bin/boot-integrity update
+ExecStart=/usr/bin/touch /var/lib/boot-checksums/.firstboot-complete
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BOOTFIRSTSVC
+    
+    systemctl enable boot-integrity-firstboot.service
+
+    # Create helper script for boot-time verification
+    cat > /usr/local/bin/boot-integrity-motd << 'MOTDSCRIPT'
+#!/usr/bin/env bash
+TEMP_OUTPUT=$(mktemp)
+if ! /usr/local/bin/boot-integrity verify 2>&1 | tee "$TEMP_OUTPUT" | grep -q "INTEGRITY CHECK PASSED"; then
+    echo "" > /etc/motd
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> /etc/motd
+    echo "⚠️  WARNING: BOOT INTEGRITY CHECK FAILED" >> /etc/motd
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> /etc/motd
+    echo "" >> /etc/motd
+    echo "Files in /boot have been modified since last update." >> /etc/motd
+    echo "" >> /etc/motd
+    
+    # Extract and show first 5 changes
+    CHANGES=$(grep -E "^  (\+|-|~)" "$TEMP_OUTPUT" | head -5)
+    if [[ -n "$CHANGES" ]]; then
+        echo "Changed files:" >> /etc/motd
+        echo "$CHANGES" >> /etc/motd
+        TOTAL=$(grep -cE "^  (\+|-|~)" "$TEMP_OUTPUT")
+        if [[ $TOTAL -gt 5 ]]; then
+            echo "  ... and $((TOTAL - 5)) more" >> /etc/motd
+        fi
+        echo "" >> /etc/motd
+    fi
+    
+    echo "This could indicate:" >> /etc/motd
+    echo "  • Kernel update (run: sudo boot-integrity update)" >> /etc/motd
+    echo "  • Unauthorized modification (investigate!)" >> /etc/motd
+    echo "" >> /etc/motd
+    echo "Full details: sudo boot-integrity verify" >> /etc/motd
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >> /etc/motd
+    echo "" >> /etc/motd
+else
+    rm -f /etc/motd
+fi
+rm -f "$TEMP_OUTPUT"
+MOTDSCRIPT
+    chmod +x /usr/local/bin/boot-integrity-motd
+
+    # Create boot-time verification service with MOTD warning
+    cat > /etc/systemd/system/boot-integrity-check.service << 'BOOTCHECKSVC'
+[Unit]
+Description=Boot integrity verification check
+ConditionPathExists=/var/lib/boot-checksums/boot.sha256
+After=local-fs.target boot-integrity-firstboot.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/boot-integrity-motd
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BOOTCHECKSVC
+    
+    systemctl enable boot-integrity-check.service
 
     print_step "10.6.6" "Boot integrity tools installed"
     echo "Command: boot-integrity {verify|update|info}"
@@ -692,6 +1101,13 @@ HOOKCONTENT
     echo "  sudo boot-integrity verify -v   - Detailed check with checksums"
     echo "  sudo boot-integrity update      - Update after legitimate changes"
     echo "  boot-integrity info             - View checksum database info"
+    echo ""
+    echo -e "\e[32mSecurity: Checksum database is IMMUTABLE\e[0m"
+    echo "  • Cannot be modified without removing chattr +i"
+    echo "  • Protects against silent tampering via hooks"
+    echo "  • Re-immutable after each update"
+    echo "  • First boot: Auto-updates after firmware settles"
+    echo "  • Boot check: Automatic verification with MOTD warning"
 fi
 
 print_step "10.7" "Creating user $USRNAME"
@@ -964,6 +1380,7 @@ echo "Hostname: ${GREEN}${HOSTNAME}${RESET}"
 echo "Username: ${GREEN}${USRNAME}${RESET}"
 echo "Disk: ${GREEN}${DISK}${RESET}"
 echo "Timezone: ${GREEN}${TIMEZONE}${RESET}"
+echo "Filesystem: ${GREEN}${FILESYSTEM}${RESET}"
 if [[ "$USE_ENCRYPTION" == true ]]; then
     echo "Encryption: ${GREEN}ENABLED${RESET}"
 else
@@ -973,6 +1390,15 @@ if [[ "$USE_ENCRYPTION" == true ]] && [[ "$ENCRYPT_BOOT" == true ]]; then
     echo "Boot Encryption: ${GREEN}ENABLED (Advanced)${RESET}"
 fi
 echo ""
+
+if [[ "$USE_BTRFS" == true ]]; then
+    print_warning "BTRFS Snapshot Commands:"
+    echo "  Create:  sudo snapper -c root create -d 'Description'"
+    echo "  List:    snapper -c root list"
+    echo "  Delete:  sudo snapper -c root delete <number>"
+    echo "  Check compression: sudo compsize /"
+    echo ""
+fi
 
 if [[ "$USE_ENCRYPTION" == true ]] && [[ "$ENCRYPT_BOOT" == false ]]; then
     print_warning "Boot Integrity Monitoring Enabled:"

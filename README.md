@@ -23,6 +23,7 @@ It handles full disk formatting, encryption setup, filesystem configuration, sys
 
 ###  What's Included
 - **Full UEFI-based Arch installation**
+- **BTRFS or ext4 filesystem** with optional snapshots (snapper)
 - **LVM on LUKS encryption** (optional)
 - **Automated disk partitioning** (EFI + boot + encrypted root)
 - **Zsh and [Oh My Zsh](https://ohmyz.sh/)** configured for the user
@@ -58,14 +59,23 @@ It handles full disk formatting, encryption setup, filesystem configuration, sys
 ./blackstrap.sh --encrypt-boot
 ```
 - **Advanced**: LUKS1 for /boot + LUKS2 for root (dual encryption)
-- Requires password **twice** at boot (GRUB, then kernel)
+- Requires password **three times** at boot (GRUB reads, kernel root unlock, kernel boot mount)
 - Maximum security - entire disk encrypted including kernel
-- Uses same password for both prompts
+- Uses same password for all prompts
+- Optional keyfile reduces this to single password at GRUB
 
 ### No Encryption (Testing/VMs)
 ```bash
 ./blackstrap.sh --no-encryption
 ```
+
+### BTRFS Filesystem
+During installation, you'll be prompted to choose between:
+- **ext4** (default) - Traditional, reliable
+- **BTRFS** - Modern with compression, snapshots, and snapper integration
+  - zstd compression (typical 30-40% space savings)
+  - Subvolume layout: @, @home, @var_log
+  - Automatic snapshot management with snapper
 
 ### Help
 ```bash
@@ -94,8 +104,10 @@ It handles full disk formatting, encryption setup, filesystem configuration, sys
    - Hostname
    - Username and password
    - Timezone
+   - Filesystem type (ext4 or BTRFS)
    - Text editor preference
    - Encryption password (if applicable)
+   - Keyfile for encrypted boot (if applicable)
    - BlackArch repository installation (optional)
    - SSH server setup (optional)
 
@@ -123,7 +135,11 @@ sudo boot-integrity update
 boot-integrity info
 ```
 
-A pacman hook automatically warns you when `/boot` is modified during updates.
+**Automatic Protection:**
+- Boot-time verification runs automatically on each boot
+- If tampering is detected, a warning message appears on login (MOTD)
+- Shows which files were modified and instructions to investigate or update
+- Pacman hook warns you when `/boot` is modified during updates
 
 ### Disk Layouts
 
@@ -133,12 +149,13 @@ A pacman hook automatically warns you when `/boot` is modified during updates.
 /dev/sda2 → /boot (1GB, unencrypted, checksummed)
 /dev/sda3 → LUKS2 → LVM
             ├─ swap (4GB)
-            └─ root (remaining)
+            └─ root (remaining, ext4 or BTRFS)
 ```
 - ✅ Best balance of security and usability
 - ✅ Single password at boot
 - ✅ Boot integrity monitoring detects tampering
 - ✅ Modern LUKS2 encryption with Argon2id
+- ✅ Optional BTRFS with compression and snapper snapshots
 
 **Full Disk Encryption (--encrypt-boot - Maximum Security):**
 ```
@@ -150,7 +167,8 @@ A pacman hook automatically warns you when `/boot` is modified during updates.
 ```
 - ✅ Maximum security - kernel and initramfs encrypted
 - ✅ Dual LUKS: LUKS1 for GRUB compatibility, LUKS2 for modern security
-- ⚠️ Two password prompts at boot (same password)
+- ⚠️ Three password prompts at boot without keyfile (same password)
+- ⚠️ One password prompt with keyfile (recommended)
 - ⚠️ Slightly longer boot time
 
 **No Encryption (--no-encryption - Testing only):**
@@ -220,6 +238,12 @@ If you opt in during the install, BlackStrap will:
 - Automatic crypttab configuration (full disk encryption)
 - Pacman hooks for update warnings
 
+**With BTRFS:**
+- `btrfs-progs` utilities
+- `snapper` for snapshot management
+- Automatic snapper configuration on first boot
+- Subvolume layout optimized for snapshots
+
 **Optional Features:**
 - BlackArch repository and tools
 - SSH server (OpenSSH) with password or key-based authentication
@@ -229,34 +253,41 @@ If you opt in during the install, BlackStrap will:
 
 ##  Security Notes
 
-### Why Two Password Prompts with --encrypt-boot?
+### Password Prompts with --encrypt-boot
 
-When you use `--encrypt-boot`, you get maximum security but need to enter your password twice:
+When you use `--encrypt-boot`, you'll be asked during installation whether to use a keyfile:
 
+**Without Keyfile (3 password prompts):**
 1. **GRUB prompt**: Unlocks `/boot` (LUKS1) to read kernel and initramfs
-2. **Kernel prompt**: Unlocks root filesystem (LUKS2) to boot the system
+2. **Kernel prompt**: Unlocks root filesystem (LUKS2)
+3. **Kernel prompt**: Unlocks `/boot` again for mounting
+
+**With Keyfile (1 password prompt - Recommended):**
+1. **GRUB prompt**: Unlocks `/boot` (LUKS1) to read kernel and initramfs
+2. Root and `/boot` auto-unlock via embedded keyfile
 
 **Why LUKS1 + LUKS2?**
 - GRUB can only decrypt LUKS1 (not LUKS2)
 - LUKS2 uses Argon2id (much stronger than LUKS1's PBKDF2)
 - This setup gives you GRUB compatibility + modern encryption
-- Both prompts use the **same password** you set during installation
+- All prompts use the **same password** you set during installation
 
 **Is it worth it?**
 - For high-security environments: **Yes** - prevents evil maid attacks completely
 - For most users: **No** - standard encryption with boot integrity monitoring is sufficient
+- If using encrypted boot, the keyfile option is highly recommended
 
 ### Boot Integrity vs Full Disk Encryption
 
-| Feature | Standard (Default) | Full Disk (--encrypt-boot) |
-|---------|-------------------|----------------------------|
-| Root filesystem | ✅ LUKS2 encrypted | ✅ LUKS2 encrypted |
-| /boot partition | ❌ Unencrypted | ✅ LUKS1 encrypted |
-| Password prompts | 1 (at boot) | 2 (GRUB + boot) |
-| Tampering detection | ✅ SHA256 checksums | ✅ Encryption |
-| Evil maid protection | ⚠️ Detection only | ✅ Full prevention |
-| Ease of use | ✅ Simple | ⚠️ More complex |
-| Boot time | ✅ Fast | ⚠️ Slightly slower |
+| Feature | Standard (Default) | Full Disk (no keyfile) | Full Disk (with keyfile) |
+|---------|-------------------|------------------------|-------------------------|
+| Root filesystem | ✅ LUKS2 encrypted | ✅ LUKS2 encrypted | ✅ LUKS2 encrypted |
+| /boot partition | ❌ Unencrypted | ✅ LUKS1 encrypted | ✅ LUKS1 encrypted |
+| Password prompts | 1 (at boot) | 3 (GRUB + root + boot) | 1 (GRUB only) |
+| Tampering detection | ✅ SHA256 checksums | ✅ Encryption | ✅ Encryption |
+| Evil maid protection | ⚠️ Detection only | ✅ Full prevention | ✅ Full prevention |
+| Ease of use | ✅ Simple | ⚠️ Complex | ✅ Reasonable |
+| Boot time | ✅ Fast | ⚠️ Slightly slower | ⚠️ Slightly slower |
 
 ---
 
@@ -283,9 +314,9 @@ When you use `--encrypt-boot`, you get maximum security but need to enter your p
 
 ##  Future Improvements
 
-- BTRFS or other filesystem options
 - Multi-boot support
 - Custom partition sizing
+- Additional filesystem options (XFS, F2FS)
 
 ---
 
