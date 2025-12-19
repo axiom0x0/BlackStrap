@@ -202,6 +202,8 @@ During installation, you can choose to install and configure an SSH server with 
 
 **Important**: With key-based auth, you must have your SSH keys ready or the script will help you create them. Without copying your key during installation, you won't be able to SSH into the system after reboot!
 
+**VM Testing Note**: Your host machine must be able to reach the VM's IP address to run `ssh-copy-id` during installation. If using default VM networking (NAT), you may not be able to access the VM's IP from your host. In this case, configure **bridge networking** in your VM settings so the VM gets an IP on your local network. This has been tested successfully with VMware Fusion on macOS using bridged networking.
+
 Example workflow:
 ```bash
 # On your local machine (when prompted during installation):
@@ -291,15 +293,6 @@ When you use `--encrypt-boot`, you'll be asked during installation whether to us
 
 ---
 
-##  Additional Notes
-
-**For deployment:**
-- All configuration is now handled via interactive prompts
-- No need to edit the script directly
-- The script validates inputs and provides helpful error messages
-- Review and customize the encryption setup for your specific needs
-
----
 
 ##  File Overview
 
